@@ -16,7 +16,8 @@ from src.model_manager import initialize_model_and_processor
 from src.trainer import *
 from src.GRPOtrainer import GRPOTrainer
 from src.PPOtrainer import PPOTrainer
-from src.RLtrainer import RLTrainer
+from src.ACtrainer import ACTrainer
+from src.reinforce_trainer import REINFORCETrainer
 from datetime import datetime
 if TENSORBOARD_LOG:
     from torch.utils.tensorboard import SummaryWriter
@@ -167,6 +168,12 @@ def main():
         rl_trainer = PPOTrainer(model_to_test, standard_trainer.processor, train_loader, val_loader, device, config, use_accelerator=USE_ACCELERATOR, tb_writer=tb_writer)
     elif POLICY_UPDATE=="AC":
         rl_trainer = RLTrainer(model_to_test, standard_trainer.processor, train_loader, val_loader, device, config, use_accelerator=USE_ACCELERATOR, tb_writer=tb_writer)
+    elif POLICY_UPDATE=="REINFORCE":
+        rl_trainer = RLTrainer(model_to_test, standard_trainer.processor, train_loader, val_loader, device, config, use_accelerator=USE_ACCELERATOR, tb_writer=tb_writer)
+    else:
+        print(f"Unknown policy passed {POLICY_UPDATE}. Terminating.")
+        print(f"Available policies GRPO, PPO, AC and REINFORCE.")
+        return
     evaluate_samples(
         model_to_test, rl_trainer.processor, DEVICE, dataset, "test",
         prefix="<CirclesQA>",
