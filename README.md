@@ -27,3 +27,6 @@
   | RL – REINFORCE               |          XX  |               XX  |
   | RL – PPO                     |          XX  |               XX  |
   | RL – GRPO                    |          XX  |               XX  |
+
+
+First, we SFT fine-tuned the model for 100 epochs with a batch size of 20 on 5,000 image-text pairs using a learning rate of 1e-5.
