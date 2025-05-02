@@ -38,8 +38,11 @@ def main():
     logger.info("Dataset loaded successfully.")
 
     # Create custom dataset objects for training and validation
-    train_data = CirclesQADataset(dataset["train"], prefix="<CirclesQA>")
-    val_data = CirclesQADataset(dataset["validation"], prefix="<CirclesQA>")
+    answers_options="full"
+    if POLICY_UPDATE=="REINFORCE":
+        answers_options="shortened"
+    train_data = CirclesQADataset(dataset["train"], prefix="<CirclesQA>", answers_options=answers_options)
+    val_data = CirclesQADataset(dataset["validation"], prefix="<CirclesQA>", answers_options=answers_options)
 
     # Initialize model and processor
     model, processor = initialize_model_and_processor(DEVICE)
@@ -94,7 +97,10 @@ def main():
     # ------------------
     # SFT Training Loop
     # ------------------
-    standard_trainer = BaseTrainer(model, processor, train_loader, val_loader, device, config, use_accelerator=USE_ACCELERATOR, tb_writer=tb_writer)
+    checkpoint_dir = "checkpoint/"
+    if POLICY_UPDATE=="REINFORCE":
+        checkpoint_dir = "checkpoint_sft_for_reinforce/"
+    standard_trainer = BaseTrainer(model, processor, train_loader, val_loader, device, config, use_accelerator=USE_ACCELERATOR, tb_writer=tb_writer, checkpoint_dir=checkpoint_dir)
     if standard_trainer.accelerator is None or standard_trainer.accelerator.is_main_process:
         logger.info("Starting SFT training loop.")
     #standard_trainer.train(epochs=config["epochs"])
@@ -167,9 +173,9 @@ def main():
     elif POLICY_UPDATE=="PPO":
         rl_trainer = PPOTrainer(model_to_test, standard_trainer.processor, train_loader, val_loader, device, config, use_accelerator=USE_ACCELERATOR, tb_writer=tb_writer)
     elif POLICY_UPDATE=="AC":
-        rl_trainer = RLTrainer(model_to_test, standard_trainer.processor, train_loader, val_loader, device, config, use_accelerator=USE_ACCELERATOR, tb_writer=tb_writer)
+        rl_trainer = ACTrainer(model_to_test, standard_trainer.processor, train_loader, val_loader, device, config, use_accelerator=USE_ACCELERATOR, tb_writer=tb_writer)
     elif POLICY_UPDATE=="REINFORCE":
-        rl_trainer = RLTrainer(model_to_test, standard_trainer.processor, train_loader, val_loader, device, config, use_accelerator=USE_ACCELERATOR, tb_writer=tb_writer)
+        rl_trainer = REINFORCETrainer(model_to_test, standard_trainer.processor, train_loader, val_loader, device, config, use_accelerator=USE_ACCELERATOR, tb_writer=tb_writer)
     else:
         print(f"Unknown policy passed {POLICY_UPDATE}. Terminating.")
         print(f"Available policies GRPO, PPO, AC and REINFORCE.")

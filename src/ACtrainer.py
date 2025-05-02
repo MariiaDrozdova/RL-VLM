@@ -47,7 +47,7 @@ class ACTrainer(BaseTrainer):
         device,
         config,
         use_accelerator: bool = True,
-        checkpoint_dir: str = "rl_checkpoint/",
+        checkpoint_dir: str = "ac_checkpoint/",
         tb_writer: SummaryWriter = None
     ):
         super().__init__(
@@ -92,53 +92,74 @@ class ACTrainer(BaseTrainer):
             self.logger.info("No accelerator: running on raw device.")
 
     @torch.no_grad()
-    def generate_one_pass(
-        self,
-        input_ids: torch.LongTensor,
-        pixel_values: torch.FloatTensor,
-        max_new_tokens: int = None
-    ):
-        """
-        Sample a response, returning:
-          - seqs      : [B, T] new token IDs (excluding prompt)
-          - logps     : [B, T] log-probs under current policy
-          - state_emb : [B, D] encoder embedding for baseline
-        """
+    def generate_one_pass(self, input_ids, pixel_values, max_new_tokens=None):
         if max_new_tokens is None:
             max_new_tokens = self.max_new_tokens
-
+    
         B = input_ids.size(0)
-        # encoder pass to get state embedding
-        enc = self.model(
-            input_ids=input_ids,
-            pixel_values=pixel_values,
-            return_dict=True,
-            output_hidden_states=True
-        )
-        state_emb = enc.encoder_last_hidden_state[:, 0, :]  # [B, D]
+        H = self.hidden_size
+    
+        # accumulators
+        sum_state_emb = torch.zeros(B, H, device=self.device)
+        num_steps     = 0
+    
+        generated_ids = []
+        all_log_probs = []
+    
+        bos_token_id = 2
+        eos_token_id = 2
+        decoder_input_ids = torch.tensor([[2, 0]] * B, dtype=torch.long, device=self.device)
+        finished = torch.zeros(B, dtype=torch.bool, device=self.device)
+    
+        for _ in range(max_new_tokens):
+            outputs = self.model(
+                input_ids=input_ids,
+                pixel_values=pixel_values,
+                decoder_input_ids=decoder_input_ids,
+                output_hidden_states=True,
+                return_dict=True
+            )
+    
+            # pull out just the [CLS] or last-hidden embedding once
+            state_emb = outputs.encoder_last_hidden_state[:, 0, :]  # [B, H]
+            sum_state_emb += state_emb
+            num_steps    += 1
+    
+            # sampling
+            logits = outputs.logits[:, -1, :]               # [B, V]
+            #probs  = torch.softmax(logits, dim=-1)          # [B, V]
+            #dist   = torch.distributions.Categorical(probs)
+            dist = torch.distributions.Categorical(logits=logits)
+            nxt    = dist.sample()                          # [B]
+            lp     = dist.log_prob(nxt)                     # [B]
 
-        # sample via generate + scores
-        gen_out = self.model.generate(
-            input_ids=input_ids,
-            pixel_values=pixel_values,
-            max_new_tokens=max_new_tokens,
-            do_sample=True,
-            return_dict_in_generate=True,
-            output_scores=True,
-            use_cache=True,
-        )
-        # strip prompt tokens
-        seqs = gen_out.sequences[:, input_ids.size(1):]  # [B, T]
-        scores = gen_out.scores                           # list of T tensors [B, V]
-
-        # compute log-probs
-        logps = []
-        for t, logits in enumerate(scores):
-            dist  = torch.distributions.Categorical(logits=logits)
-            logps.append(dist.log_prob(seqs[:, t]))       # [B]
-        logps = torch.stack(logps, dim=1)                 # [B, T]
-
-        return seqs, logps, state_emb
+            # advance decoder inputs
+            decoder_input_ids = torch.cat([decoder_input_ids, nxt.unsqueeze(-1)], dim=1)
+            
+            # 1) mask after EOS
+            mask = ~finished
+            nxt  = torch.where(mask, nxt, eos_token_id)
+            lp   = lp  * mask.float()
+        
+            # 2) append
+            generated_ids.append(nxt.unsqueeze(-1))
+            all_log_probs.append(lp  .unsqueeze(-1))
+        
+            # 3) update finished and decoder inputs
+            finished |= (nxt == eos_token_id)
+            decoder_input_ids = torch.cat([decoder_input_ids, nxt.unsqueeze(-1)], dim=1)
+    
+        # stack only the things you need to
+        generated_ids = torch.cat(generated_ids, dim=1)    # [B, T]
+        all_log_probs = torch.stack(all_log_probs, dim=1)  # [B, T]
+    
+        # now do the mean‐pool:
+        avg_state_emb = sum_state_emb / float(num_steps)   # [B, H]
+    
+        if self.accelerator is not None:
+            self.accelerator.wait_for_everyone()
+    
+        return generated_ids, all_log_probs, avg_state_emb
 
     def train_rl(self, epochs: int = 3):
         """
@@ -154,10 +175,6 @@ class ACTrainer(BaseTrainer):
             value_loss_sum  = 0.0
 
             train_actor = (epoch >= self.critic_warmup_epochs)
-
-            # optionally freeze vision tower
-            for p in self.model.vision_tower.parameters():
-                p.requires_grad = False
 
             for inputs, answers in tqdm(self.train_loader, desc=f"RL Epoch {epoch+1}/{epochs}"):
                 
@@ -257,9 +274,16 @@ class ACTrainer(BaseTrainer):
 
         if avg_val > self.best_val:
             self.best_val = avg_val
+            if self.accelerator is not None:
+                # get back the underlying HF model
+                model_to_save = self.accelerator.unwrap_model(self.model)
+            else:
+                model_to_save = self.model
+                    
+            # now it's safe to call HF save
             os.makedirs(self.checkpoint_dir, exist_ok=True)
-            to_save = self.model.module if hasattr(self.model, "module") else self.model
-            to_save.save_pretrained(self.checkpoint_dir)
-            torch.save(to_save.state_dict(), os.path.join(self.checkpoint_dir, "pytorch_model.bin"))
+            model_to_save.save_pretrained(self.checkpoint_dir)
+            torch.save(model_to_save.state_dict(),
+                os.path.join(self.checkpoint_dir, "pytorch_model.bin"))
             self.processor.save_pretrained(self.checkpoint_dir)
 

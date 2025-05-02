@@ -19,12 +19,12 @@ MODEL_VISION_TOWER_TRAIN = False
 TRUST_REMOTE_CODE = True
 
 # Training parameters
-TRAIN_SUBSET_SIZE = 200
-TEST_SUBSET_SIZE = 200
-TEST_HARD_SUBSET_SIZE = 200
-BATCH_SIZE = 4
+TRAIN_SUBSET_SIZE = 5000
+TEST_SUBSET_SIZE = 1000
+TEST_HARD_SUBSET_SIZE = 1000
+BATCH_SIZE = 20
 NUM_WORKERS = 0
-EPOCHS = 1
+EPOCHS = 100
 LEARNING_RATE = 1e-5
 
 
@@ -34,7 +34,7 @@ DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 DEVICE = torch.device("mps" if torch.backends.mps.is_available() else DEVICE)
 
 # GRPO training parameters
-POLICY_UPDATE="PPO"
+POLICY_UPDATE="FALE"
 GRPO_EPOCHS = 1
 GROUP_SIZE = 3
 CLIP_COEF = 0.1

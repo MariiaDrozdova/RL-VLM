@@ -65,7 +65,7 @@ def extract_vlm_data(text):
     answer    = ans_m.group(1).strip()   if ans_m   else None
     return reasoning, answer
 
-def format_vlm_response(full_description_s: str, answer_s: str) -> str:
+def format_vlm_response(full_description_s: str, answer_s: str, answers_options: str) -> str:
     """
     Given a description string of circles and an answer string, returns a styled response
     with <think></think> tokens containing step-by-step reasoning, and <answer></answer>
@@ -94,11 +94,14 @@ def format_vlm_response(full_description_s: str, answer_s: str) -> str:
     
     # Count by color
     color_counts = Counter(c['color'] for c in circles)
+
     lines.append("\nCounts by color:")
     for color, count in color_counts.items():
         lines.append(f"- {color}: {count}")
     
     # Example reasoning: check parity of white circles
+    if answers_options == "shortened":
+        lines = []
     total_count = sum(list(color_counts.values()))
     lines.append(f"\nThere are {total_count} circles.")
     if total_count % 2 == 0:
@@ -112,10 +115,11 @@ def format_vlm_response(full_description_s: str, answer_s: str) -> str:
     return think_block + "\n" + answer_block
 
 class CirclesQADataset(TorchDataset):
-    def __init__(self, hf_dataset, prefix):
+    def __init__(self, hf_dataset, prefix, answers_options="full"):
         super().__init__()              # ensure base class inits
         self.hf_dataset = hf_dataset    # keep HFDataset here
         self.prefix = prefix
+        self.answers_options = answers_options
 
     def __len__(self):
         return len(self.hf_dataset)
@@ -125,7 +129,7 @@ class CirclesQADataset(TorchDataset):
         question_id = 8  # or whichever you prefer
         answer_s = example['answers'][8]
         full_description_s = example['answers'][9]
-        answer = format_vlm_response(full_description_s, answer_s)
+        answer = format_vlm_response(full_description_s, answer_s, self.answers_options)
         if self.prefix == "CAPTION":
             question = self.prefix 
         else:

@@ -22,7 +22,7 @@ class REINFORCETrainer(BaseTrainer):
         device,
         config,
         use_accelerator: bool = True,
-        checkpoint_dir: str = "rl_checkpoint/",
+        checkpoint_dir: str = "reinforce_checkpoint/",
         tb_writer: SummaryWriter = None
     ):
         super().__init__(
@@ -35,7 +35,7 @@ class REINFORCETrainer(BaseTrainer):
         )
 
         # how many tokens to sample per example
-        self.max_new_tokens = config.get("max_new_tokens", 10)
+        self.max_new_tokens = config.get("reinforce_max_new_tokens", 17)
         # optimizer for the actor only
         lr = config.get("actor_lr", 1e-5)
         self.actor_optimizer = AdamW(self.model.parameters(), lr=lr)
@@ -47,39 +47,63 @@ class REINFORCETrainer(BaseTrainer):
             )
 
         self.global_step = 0
+        self.best_val = -float("inf")
 
-    @torch.no_grad()
-    def generate_one_pass(self, input_ids, pixel_values):
-        """
-        Sample a full response of length self.max_new_tokens, returning:
-          - seqs   : [B, T] token IDs (excluding prompt)
-          - logps  : [B, T] log-probabilities under current policy
-        """
+    def generate_one_pass(self, input_ids, pixel_values, max_new_tokens=None):
+        if max_new_tokens is None:
+            max_new_tokens = self.max_new_tokens
+    
         B = input_ids.size(0)
-
-        # use HF generate under no_grad + use_cache for speed
-        gen_out = self.model.generate(
-            input_ids=input_ids,
-            pixel_values=pixel_values,
-            max_new_tokens=self.max_new_tokens,
-            do_sample=True,
-            return_dict_in_generate=True,
-            output_scores=True,
-            use_cache=True,
-        )
-        # strip off the prompt tokens
-        T_prompt = input_ids.size(1)
-        seqs = gen_out.sequences[:, T_prompt:]         # [B, T]
-        scores = gen_out.scores                        # list of T tensors [B, V]
-
-        # compute log-probs per time‐step
-        logps = []
-        for t, logits in enumerate(scores):
+    
+        generated_ids = []
+        all_log_probs = []
+    
+        bos_token_id = 2
+        eos_token_id = 2
+        decoder_input_ids = torch.tensor([[2, 0]] * B, dtype=torch.long, device=self.device)
+        finished = torch.zeros(B, dtype=torch.bool, device=self.device)
+    
+        for _ in range(max_new_tokens):
+            outputs = self.model(
+                input_ids=input_ids,
+                pixel_values=pixel_values,
+                decoder_input_ids=decoder_input_ids,
+                output_hidden_states=True,
+                return_dict=True
+            )
+    
+            # sampling
+            logits = outputs.logits[:, -1, :]               # [B, V]
+            #probs  = torch.softmax(logits, dim=-1)          # [B, V]
+            #dist   = torch.distributions.Categorical(probs)
             dist = torch.distributions.Categorical(logits=logits)
-            logps.append(dist.log_prob(seqs[:, t]))    # [B]
-        logps = torch.stack(logps, dim=1)             # [B, T]
+            nxt    = dist.sample()                          # [B]
+            lp     = dist.log_prob(nxt)                     # [B]
 
-        return seqs, logps
+            # advance decoder inputs
+            decoder_input_ids = torch.cat([decoder_input_ids, nxt.unsqueeze(-1)], dim=1)
+            
+            # 1) mask after EOS
+            mask = ~finished
+            nxt  = torch.where(mask, nxt, eos_token_id)
+            lp   = lp  * mask.float()
+        
+            # 2) append
+            generated_ids.append(nxt.unsqueeze(-1))
+            all_log_probs.append(lp  .unsqueeze(-1))
+        
+            # 3) update finished and decoder inputs
+            finished |= (nxt == eos_token_id)
+            decoder_input_ids = torch.cat([decoder_input_ids, nxt.unsqueeze(-1)], dim=1)
+    
+        # stack only the things you need to
+        generated_ids = torch.cat(generated_ids, dim=1)    # [B, T]
+        all_log_probs = torch.stack(all_log_probs, dim=1)  # [B, T]
+    
+        if self.accelerator is not None:
+            self.accelerator.wait_for_everyone()
+    
+        return generated_ids, all_log_probs
 
     def train_rl(self, epochs: int = 3):
         """
@@ -107,8 +131,10 @@ class REINFORCETrainer(BaseTrainer):
 
                 # 2) compute rewards
                 texts = self.processor.tokenizer.batch_decode(seqs, skip_special_tokens=True)
+                
+                answers = [ans[ans.find("Counts by color"):] for ans in answers]
                 rewards = torch.tensor(
-                    [reward_function_vlm(pred, ref) for pred, ref in zip(texts, answers)],
+                    [reward_function_vlm(pred, ref)+2 for pred, ref in zip(texts, answers)],
                     dtype=torch.float,
                     device=self.device
                 )  # [B]
@@ -164,7 +190,7 @@ class REINFORCETrainer(BaseTrainer):
                 seqs, _  = self.generate_one_pass(in_ids, pix_vals)
                 texts = self.processor.tokenizer.batch_decode(seqs, skip_special_tokens=True)
                 for pred, ref in zip(texts, answers):
-                    val_r += reward_function_vlm(pred, ref)
+                    val_r += reward_function_vlm(pred, ref)+2
                     cnt  += 1
                 del in_ids, pix_vals, seqs
                 torch.cuda.empty_cache()
@@ -177,11 +203,15 @@ class REINFORCETrainer(BaseTrainer):
         # save best policy
         if avg_val > self.best_val:
             self.best_val = avg_val
+            if self.accelerator is not None:
+                # get back the underlying HF model
+                model_to_save = self.accelerator.unwrap_model(self.model)
+            else:
+                model_to_save = self.model
+                    
+            # now it's safe to call HF save
             os.makedirs(self.checkpoint_dir, exist_ok=True)
-            model_to_save = (self.accelerator.unwrap_model(self.model)
-                             if self.accelerator else self.model)
             model_to_save.save_pretrained(self.checkpoint_dir)
             torch.save(model_to_save.state_dict(),
-                       os.path.join(self.checkpoint_dir, "pytorch_model.bin"))
+                os.path.join(self.checkpoint_dir, "pytorch_model.bin"))
             self.processor.save_pretrained(self.checkpoint_dir)
-
