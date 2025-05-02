@@ -71,6 +71,8 @@ def evaluate_samples(model, processor, device, data, dataset_partition, prefix, 
         text = make_pairing_answers(color_list_str, final_label)
 
         if print_outputs:
+            print("Original output:")
+            print(result)
             print(result[prefix], " ||| ", text)
             print(last_word, " ||| ", data[dataset_partition][idx]['answers'][8])
 
@@ -98,6 +100,9 @@ def evaluate_samples(model, processor, device, data, dataset_partition, prefix, 
         correct_answers += (data[dataset_partition][idx]['answers'][8] == last_word)
 
         if print_outputs:
+            print("="*30)
+            print("Original output:")
+            print(result)
             print("="*30)
             print("Correct:", data[dataset_partition][idx]['answers'][8], "Predicted:", last_word, data[dataset_partition][idx]['answers'][8] == last_word)
             print("="*30)

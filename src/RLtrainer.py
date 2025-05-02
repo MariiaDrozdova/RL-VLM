@@ -65,23 +65,28 @@ class RLTrainer(BaseTrainer):
         self.global_step = 0
 
         # critic network
+        self.hidden_size = config.get("hidden_size", 768)
+        self.critic_warmup_epochs = config.get("critic_warmup_epochs", 3)
         hidden_dim = config.get("critic_hidden_dim", 512)
         self.critic = ValueNetwork(
-            input_dim=model.config.hidden_size,
+            input_dim=self.hidden_size,
             hidden_dim=hidden_dim
         ).to(device)
 
-        # single optimizer for actor (model) + critic
-        lr = config.get("rl_lr", 3e-5)
-        self.optimizer = AdamW(
-            list(self.model.parameters()) + list(self.critic.parameters()),
-            lr=lr
-        )
+        # Optimizers
+        lr_actor  = config.get("actor_lr", 1e-6)
+        lr_critic = config.get("critic_lr", 1e-5)
+        self.actor_optimizer  = AdamW(self.model.parameters(),  lr=lr_actor)
+        self.critic_optimizer = AdamW(self.critic.parameters(), lr=lr_critic)
 
         # accelerator wrapping
         if use_accelerator and hasattr(self, "accelerator"):
-            self.model, self.critic, self.optimizer = self.accelerator.prepare(
-                self.model, self.critic, self.optimizer
+            self.model, self.critic, \
+            self.actor_optimizer, self.critic_optimizer = self.accelerator.prepare(
+                self.model,
+                self.critic,
+                self.actor_optimizer,
+                self.critic_optimizer
             )
         else:
             self.logger.info("No accelerator: running on raw device.")
@@ -129,8 +134,7 @@ class RLTrainer(BaseTrainer):
         # compute log-probs
         logps = []
         for t, logits in enumerate(scores):
-            probs = torch.softmax(logits, dim=-1)
-            dist  = torch.distributions.Categorical(probs)
+            dist  = torch.distributions.Categorical(logits=logits)
             logps.append(dist.log_prob(seqs[:, t]))       # [B]
         logps = torch.stack(logps, dim=1)                 # [B, T]
 
@@ -149,11 +153,14 @@ class RLTrainer(BaseTrainer):
             policy_loss_sum = 0.0
             value_loss_sum  = 0.0
 
+            train_actor = (epoch >= self.critic_warmup_epochs)
+
             # optionally freeze vision tower
             for p in self.model.vision_tower.parameters():
                 p.requires_grad = False
 
             for inputs, answers in tqdm(self.train_loader, desc=f"RL Epoch {epoch+1}/{epochs}"):
+                
                 in_ids = inputs["input_ids"].to(self.device)
                 pix    = inputs["pixel_values"].to(self.device)
 
@@ -178,7 +185,9 @@ class RLTrainer(BaseTrainer):
                 loss = policy_loss + value_loss
 
                 # backward & step
-                self.optimizer.zero_grad()
+                if train_actor:
+                    self.actor_optimizer.zero_grad()
+                self.critic_optimizer.zero_grad()
                 if hasattr(self, "accelerator"):
                     self.accelerator.backward(loss)
                 else:
@@ -186,7 +195,9 @@ class RLTrainer(BaseTrainer):
 
                 nn.utils.clip_grad_norm_(self.model.parameters(),  0.5)
                 nn.utils.clip_grad_norm_(self.critic.parameters(), 0.5)
-                self.optimizer.step()
+                if train_actor:
+                    self.actor_optimizer.step()
+                self.critic_optimizer.step()
 
                 # metrics
                 B = in_ids.size(0)

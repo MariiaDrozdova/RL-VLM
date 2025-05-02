@@ -148,12 +148,34 @@ def main():
     # ------------------
     # GRPO Training Loop
     # ------------------ 
+    if standard_trainer.accelerator is not None:
+        # get back the underlying HF model
+        model_to_test = standard_trainer.accelerator.unwrap_model(standard_trainer.model)
+    else:
+        model_to_test = standard_trainer.model
+    evaluate_samples(
+        model_to_test, standard_trainer.processor, DEVICE, dataset, "test",
+        prefix="<CirclesQA>",
+        N=20, 
+        Q="Is the number of circles odd or even?",
+        print_outputs=True,
+        logger=logger,
+    )
     if POLICY_UPDATE=="GRPO":
-        rl_trainer = GRPOTrainer(model, processor, train_loader, val_loader, device, config, use_accelerator=USE_ACCELERATOR, tb_writer=tb_writer)
+        rl_trainer = GRPOTrainer(model_to_test, standard_trainer.processor, train_loader, val_loader, device, config, use_accelerator=USE_ACCELERATOR, tb_writer=tb_writer)
     elif POLICY_UPDATE=="PPO":
-        rl_trainer = PPOTrainer(model, processor, train_loader, val_loader, device, config, use_accelerator=USE_ACCELERATOR, tb_writer=tb_writer)
+        rl_trainer = PPOTrainer(model_to_test, standard_trainer.processor, train_loader, val_loader, device, config, use_accelerator=USE_ACCELERATOR, tb_writer=tb_writer)
     elif POLICY_UPDATE=="AC":
-        rl_trainer = RLTrainer(model, processor, train_loader, val_loader, device, config, use_accelerator=USE_ACCELERATOR, tb_writer=tb_writer)
+        rl_trainer = RLTrainer(model_to_test, standard_trainer.processor, train_loader, val_loader, device, config, use_accelerator=USE_ACCELERATOR, tb_writer=tb_writer)
+    evaluate_samples(
+        model_to_test, rl_trainer.processor, DEVICE, dataset, "test",
+        prefix="<CirclesQA>",
+        N=20, 
+        Q="Is the number of circles odd or even?",
+        print_outputs=True,
+        logger=logger,
+    )
+
     for i in range(1000):
         rl_trainer.train_rl()
         if rl_trainer.accelerator is None or rl_trainer.accelerator.is_main_process:

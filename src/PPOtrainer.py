@@ -66,9 +66,11 @@ class PPOTrainer(BaseTrainer):
         self.max_new_tokens = config.get("max_new_tokens", 2)
         self.best_val       = -float("inf")
         self.global_step    = 0
+        
 
         # Critic network
-        self.hidden_size = 768
+        self.hidden_size = config.get("hidden_size", 768)
+        self.critic_warmup_epochs = config.get("critic_warmup_epochs", 3)
         hidden_dim = config.get("critic_hidden_dim", 128)
         self.critic = ValueNetwork(
             input_dim=self.hidden_size,
@@ -76,8 +78,8 @@ class PPOTrainer(BaseTrainer):
         ).to(device)
 
         # Optimizers
-        lr_actor  = config.get("actor_lr", 1e-5)
-        lr_critic = config.get("critic_lr", 1e-4)
+        lr_actor  = config.get("actor_lr", 1e-6)
+        lr_critic = config.get("critic_lr", 1e-5)
         self.actor_optimizer  = AdamW(self.model.parameters(),  lr=lr_actor)
         self.critic_optimizer = AdamW(self.critic.parameters(), lr=lr_critic)
 
@@ -130,8 +132,9 @@ class PPOTrainer(BaseTrainer):
     
             # sampling
             logits = outputs.logits[:, -1, :]               # [B, V]
-            probs  = torch.softmax(logits, dim=-1)          # [B, V]
-            dist   = torch.distributions.Categorical(probs)
+            #probs  = torch.softmax(logits, dim=-1)          # [B, V]
+            #dist   = torch.distributions.Categorical(probs)
+            dist = torch.distributions.Categorical(logits=logits)
             nxt    = dist.sample()                          # [B]
             lp     = dist.log_prob(nxt)                     # [B]
             ent    = dist.entropy()                         # [B]
@@ -178,6 +181,7 @@ class PPOTrainer(BaseTrainer):
 
         num_epochs = self.config.get("ppo_epochs", 3)
         for epoch in range(num_epochs):
+            train_actor = (epoch >= self.critic_warmup_epochs)
             memory = []
 
             # === 1) Collect trajectories ===
@@ -189,6 +193,7 @@ class PPOTrainer(BaseTrainer):
                 seqs, old_logps, emb, ents = self.generate_one_pass(input_ids, pixel_values)
 
                 preds = self.processor.tokenizer.batch_decode(seqs, skip_special_tokens=True)
+                #print(preds)
                 rewards = torch.tensor(
                     [reward_function_vlm(p, g) for p, g in zip(preds, answers)],
                     dtype=torch.float,
@@ -248,7 +253,8 @@ class PPOTrainer(BaseTrainer):
                     total_loss = policy_loss + value_loss + entropy_loss
 
                     # backward + step (actor + critic)
-                    self.actor_optimizer.zero_grad()
+                    if train_actor:
+                        self.actor_optimizer.zero_grad()
                     self.critic_optimizer.zero_grad()
                     if hasattr(self, "accelerator"):
                         self.accelerator.backward(total_loss)
@@ -257,7 +263,8 @@ class PPOTrainer(BaseTrainer):
 
                     nn.utils.clip_grad_norm_(self.model.parameters(),  0.5)
                     nn.utils.clip_grad_norm_(self.critic.parameters(), 0.5)
-                    self.actor_optimizer.step()
+                    if train_actor:
+                        self.actor_optimizer.step()
                     self.critic_optimizer.step()
 
                     # log to TensorBoard
@@ -285,6 +292,8 @@ class PPOTrainer(BaseTrainer):
                         seqs, _, _, _ = self.generate_one_pass(inp, pix)
 
                         texts = self.processor.tokenizer.batch_decode(seqs, skip_special_tokens=True)
+                        print(texts)
+                        print(answers)
                         for t, g in zip(texts, answers):
                             val_reward += reward_function_vlm(t, g)
                             n_samples  += 1
